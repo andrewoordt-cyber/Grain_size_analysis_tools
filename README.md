@@ -11,3 +11,4 @@ This is a repo to store tools I build for analyzing grain size data from the las
 - I can also be useful for analysis of a single dataset. 
 
 To render soil_profile_comparison.Rmd from another project use the generate_report_soil_profile_comparison.R template
+- if you copy this repo to work with these tools YOU MUST EDIT THE LOCATION OF THE "grain_size_analysis_tools.Rmd" AND "render_helpers.R" IN THIS SCRIPT 
