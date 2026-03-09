@@ -1,5 +1,5 @@
 ---
-title: "PSD Explorer"
+title: "`r paste(params$sample_location, '- Soil Profile Textural Analysis')`"
 author: "`r params$author`"
 date: "`r Sys.Date()`"
 output:
@@ -9,6 +9,7 @@ output:
     toc_depth: 3
     code_folding: hide
 params:
+  sample_location: "Site"
   author: ""
   min_replicates: 2
 ---
