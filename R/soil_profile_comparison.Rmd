@@ -11,6 +11,7 @@ output:
 params:
   sample_location: "Site"
   author: ""
+  data_files: NULL  # List of dataset configs: list(path, label, colour)
   min_replicates: 2
 ---
 
@@ -54,15 +55,27 @@ library(soiltexture)
 # ║  dataset are treated as replicates of each other.           ║
 # ╚══════════════════════════════════════════════════════════════╝
 
-data_files <- list(
-  list(path = "data/dataset1.txt", label = "Dataset 1",
-       colour = "#4E79A7"),
-  list(path = "data/dataset2.txt", label = "Dataset 2",
-       colour = "#F28E2B"),
-  list(path = "data/dataset3.txt", label = "Dataset 3",
-       colour = "#59A14F")
-)
+# Validate required parameters
+if (is.null(params$data_files)) {
+  stop("Error: data_files parameter is required.
+       Provide a list of datasets with 'path', 'label', and 'colour' fields.
+       
+       Example:
+       data_files = list(
+         list(path = 'data/dataset1.txt', label = 'Dataset 1', colour = '#4E79A7'),
+         list(path = 'data/dataset2.txt', label = 'Dataset 2', colour = '#F28E2B')
+       )")
+}
 
+# Validate that all files exist
+for (dataset in params$data_files) {
+  if (!file.exists(dataset$path)) {
+    stop(paste("Error: File not found:", dataset$path))
+  }
+}
+
+data_files <- params$data_files
+min_replicates <- params$min_replicates
 
 # Minimum replicates required to include a sample group
 # Override at render time: rmarkdown::render(..., params = list(min_replicates = 3))
