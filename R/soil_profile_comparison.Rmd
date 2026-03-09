@@ -1,0 +1,565 @@
+---
+title: "PSD Explorer"
+author: "A_Oordt"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 10, fig.height = 6)
+
+library(tidyverse)
+library(scales)
+library(janitor)
+library(knitr)
+library(ggtern)
+library(ggsoiltexture)
+library(soiltexture)
+
+# ╔══════════════════════════════════════════════════════════════╗
+# ║                        CONFIG                               ║
+# ╠══════════════════════════════════════════════════════════════╣
+# ║  Add one list() entry per dataset.                          ║
+# ║  label  – display name in all plots / tables                ║
+# ║  colour – hex colour for this dataset                       ║
+# ║                                                             ║
+# ║  SAMPLE NAMING CONVENTION                                   ║
+# ║  <sample_id>_<meta_code>_<rep_number>_<optional_note>       
+# ║  ensure consistency in depth unites ie. meters vs centimeters 
+# ║                                                             ║
+# ║  Examples:                                                  ║
+# ║    25-CR-R-0.4_B_2                                          ║
+# ║      sample_id  = 25-CR-R-0.4                               ║
+# ║      meta_code  = B   (treatment, prep method, etc.)        ║
+# ║      rep        = 2                                         ║
+# ║      note       = (none)                                    ║
+# ║                                                             ║
+# ║    25-CR-R-0.4_B_2_sonic                                    ║
+# ║      sample_id  = 25-CR-R-0.4                               ║
+# ║      meta_code  = B                                         ║
+# ║      rep        = 2                                         ║
+# ║      note       = sonic   (free text, shown in tables)      ║
+# ║                                                             ║
+# ║  Samples sharing the same sample_id + meta_code within a   ║
+# ║  dataset are treated as replicates of each other.           ║
+# ╚══════════════════════════════════════════════════════════════╝
+
+data_files <- list(
+  list(path = "data/25-CR-R_B_sonic_avg_only.txt", label = "H2O2 with sonication",
+       colour = "#4E79A7"),
+  list(path = "data/25-CR-R_F_avg_only_renamed.txt", label = "Acetic then H2O2",
+       colour = "#F28E2B"),
+  list(path = "data/AV_Radovin_export_avg_only.txt", label = "H2O2 without sonication",
+       colour = "#59A14F")
+)
+
+
+# Minimum replicates required to include a sample group
+min_replicates <- 2
+
+# ── END CONFIG ───────────────────────────────────────────────────────────────
+```
+
+```{r load-and-parse, include=FALSE}
+
+# Dataset colour lookup
+dataset_colours <- setNames(
+  map_chr(data_files, "colour"),
+  map_chr(data_files, "label")
+)
+
+# Defines a function to read one instrument export 
+read_instrument_file <- function(path, dataset_label, ref_bin_names = NULL) {
+  dat <- readr::read_delim(
+    file           = path,
+    delim          = "\t",
+    locale         = readr::locale(encoding = "UTF-16LE"),
+    show_col_types = FALSE
+  ) |>
+    dplyr::mutate(dplyr::across(
+      dplyr::where(is.character),
+      ~ gsub("\\?m", "um", .x)
+    )) |>
+    janitor::clean_names(replace = c("\u00B5" = "u", "\u03bc" = "u")) |>
+    mutate(
+      sample_name = sample_name |>
+        str_remove("^Average of\\s*'") |>
+        str_remove("'\\s*$"),
+      dataset = dataset_label
+    )
+  
+  # If reference bin names provided, rename this file's bin columns to match
+  if (!is.null(ref_bin_names)) {
+    bin_cols <- names(dat)[str_detect(names(dat), "^x\\d")]
+    if (length(bin_cols) == length(ref_bin_names)) {
+      dat <- dat |> rename(setNames(bin_cols, ref_bin_names))
+    } else {
+      warning(sprintf("File %s has %d bin columns, reference has %d — skipping rename",
+                      path, length(bin_cols), length(ref_bin_names)))
+    }
+  }
+  dat
+}
+
+# Load all datasets into a single 
+
+# Read first file to get reference bin names
+ref_file     <- data_files[[1]]
+ref_dat      <- read_instrument_file(ref_file$path, ref_file$label)
+ref_bin_names <- names(ref_dat)[str_detect(names(ref_dat), "^x\\d")]
+
+# Load all datasets using reference bin names
+all_raw <- map_dfr(data_files, function(f) {
+  if (!file.exists(f$path)) {
+    warning("File not found, skipping: ", f$path)
+    return(NULL)
+  }
+  read_instrument_file(f$path, f$label, ref_bin_names = ref_bin_names)
+})
+
+# ── Split binned grain size data from vs summary stats 
+id_cols    <- c("sample_name", "dataset")
+is_bin_col <- str_detect(names(all_raw), "^x\\d")
+
+## psd_long is the binned data
+psd_long <- all_raw[, c(id_cols, names(all_raw)[is_bin_col]), drop = FALSE] |>
+  pivot_longer(
+    cols      = matches("^x\\d"),
+    names_to  = "grain_um",
+    values_to = "perc_vol_in"
+  ) |>
+  mutate(
+    grain_um = as.numeric(
+      str_replace_all(str_remove(grain_um, "^x"), "_", "."))
+  )
+## summ_long is the summary data from Malvern's calulations
+summ_long <- all_raw |>
+  select(-matches("^x\\d")) |>
+  pivot_longer(
+    cols      = where(is.numeric),
+    names_to  = "metric",
+    values_to = "value_raw"
+  )
+
+# ── Parse sample names ────────────────────────────────────────────────────────
+## defines a function to read out my sample name code
+## Sample codes is samplename-depth_treatmentcode_replicatenumber_notes
+
+parse_sample_name <- function(nm) {
+  tibble(sample_name = nm) |>
+    mutate(
+      # look to see if there is any text at the end of the name with special notes
+      note      = str_extract(sample_name, "(?<=_\\d{1,3}_)[^_].+$"),
+      # identifies the replicate number
+      rep_num   = str_extract(sample_name, "\\d+(?=(_[^_]+)?$)"),
+      # identifies the pretreatment code
+      meta_code = str_extract(sample_name,
+                               paste0("(?<=_)[A-Z](?=_", rep_num, ")")),
+      # identifies the base sample name including the depth value 
+      sample_id = str_remove(
+        sample_name,
+        paste0("_", replace_na(meta_code, ""),
+               if_else(!is.na(meta_code), "_", ""),
+               rep_num,
+               if_else(!is.na(note), paste0("_", note), ""),
+               "$")
+      ),
+      # extracts the depth value from the base name 
+      depth_val = as.numeric(str_extract(sample_id, "[\\d.]+$"))
+    )
+}
+# generates a table that summarizes the details from the sample name 
+# key table that everything else joins against to get sample_id, depth_val, meta_code, and note
+sample_info <- psd_long |>
+  distinct(sample_name, dataset) |>
+  bind_cols(
+    parse_sample_name(
+      psd_long |> distinct(sample_name, dataset) |> pull(sample_name)
+    ) |> select(-sample_name)
+  )
+
+# ── Replicate groups ──────────────────────────────────────────────────────────
+## one row per unique sample group, with everything needed to loop through them and pull their data.
+replicate_groups <- sample_info |>
+  group_by(dataset, sample_id, depth_val, meta_code) |>
+  summarise(
+    n_replicates = n(),
+    sample_names = list(sample_name),
+    notes        = list(unique(na.omit(note))),
+    .groups      = "drop"
+  ) |>
+  filter(n_replicates >= min_replicates) |>
+  mutate(dataset = factor(dataset, levels = map_chr(data_files, "label"))) |>
+  arrange(dataset, depth_val) |>
+  mutate(dataset = as.character(dataset))
+
+# ── Attach parsed fields back to psd_long and summ_long ──────────────────────
+psd_long <- psd_long |>
+  left_join(
+    sample_info |> select(sample_name, dataset, sample_id, depth_val, meta_code, note),
+    by = c("sample_name", "dataset")
+  )
+
+summ_long <- summ_long |>
+  left_join(
+    sample_info |> select(sample_name, dataset, sample_id, depth_val, meta_code, note),
+    by = c("sample_name", "dataset")
+  )
+
+# ── Pre-compute CV% for all groups in one pass ────────────────────────────────
+# D10/D50/D90 read from instrument export columns — not derived from bin data.
+cv_all_raw <- summ_long |>
+  filter(metric %in% c("dx_10", "dx_50", "dx_90")) |>
+  mutate(value = as.numeric(value_raw)) |>
+  # grab only samples from the same dataset that belong to the same replicate group
+  inner_join(
+    replicate_groups |> select(dataset, sample_id, meta_code),
+    by = c("dataset", "sample_id", "meta_code")
+  ) |>
+  #calculates mean, sd, and coefficient of variation for each metric group d10, d50, d90 for each replicate group
+  group_by(dataset, sample_id, depth_val, meta_code, metric) |>
+  summarise(
+    mean_val = mean(value, na.rm = TRUE),
+    sd_val   = sd(value,   na.rm = TRUE),
+    cv_pct   = (sd_val / mean_val) * 100,
+    .groups  = "drop"
+  ) |>
+  # assigns a qualifier for each to indicate how well we replicated samples. 
+  mutate(
+    metric_label = recode(metric,
+      "dx_10" = "D10", "dx_50" = "D50", "dx_90" = "D90"),
+    status = case_when(
+      cv_pct < 3  ~ "Excellent",
+      cv_pct < 5  ~ "Good",
+      cv_pct < 10 ~ "Acceptable",
+      TRUE        ~ "Poor"
+    )
+  )
+
+# ── Pre-split psd_long by replicate group for fast loop access ────────────────
+psd_split <- psd_long |>
+  filter(sample_id %in% replicate_groups$sample_id) |>
+  group_by(dataset, sample_id, meta_code) |>
+  group_split() |>
+  setNames(
+    psd_long |>
+      filter(sample_id %in% replicate_groups$sample_id) |>
+      distinct(dataset, sample_id, meta_code) |>
+      arrange(dataset, sample_id, meta_code) |>
+      mutate(key = paste(dataset, sample_id, meta_code, sep = "||")) |>
+      pull(key)
+  )
+```
+
+---
+
+# Overview
+
+```{r overview, echo=FALSE}
+# text showing number of datasets loaded 
+cat(sprintf("Datasets loaded:      %d\n", n_distinct(replicate_groups$dataset)))
+
+# text showing total number of sample groups with the minimum number of replicates required 
+cat(sprintf("Sample groups found:  %d  (minimum %d replicates each)\n\n",
+            nrow(replicate_groups), min_replicates))
+# displays the replicate groups in a summary table 
+replicate_groups |>
+  mutate(
+    Notes      = map_chr(notes, ~ if (length(.x) == 0) "—" else paste(.x, collapse = ", ")),
+    Replicates = map_chr(sample_names, ~ paste(.x, collapse = ", "))
+  ) |>
+  select(
+    Dataset     = dataset,
+    `Sample ID` = sample_id,
+    Depth       = depth_val,
+    Code        = meta_code,
+    Notes,
+    N           = n_replicates,
+    Replicates
+  ) |>
+  # kable() is used to generate a table in HTML format 
+  kable()
+```
+---
+
+
+# USDA Soil Texture Triangle
+
+Soil textural triangle showing each dataset plotted as different colors. 
+
+```{r texture-triangle, echo=FALSE, fig.height=9, fig.width=10, message=FALSE, warning=FALSE}
+
+replicate_texture <- psd_long |>
+  filter(sample_id %in% replicate_groups$sample_id) |>
+  mutate(
+    fraction = case_when(
+      grain_um < 2                     ~ "clay",
+      grain_um >= 2  & grain_um < 50   ~ "silt",
+      grain_um >= 50 & grain_um < 2000 ~ "sand",
+      TRUE                             ~ "gravel"
+    )
+  ) |>
+  group_by(dataset, sample_name, sample_id, depth_val, fraction) |>
+  summarise(perc = sum(perc_vol_in, na.rm = TRUE), .groups = "drop") |>
+  pivot_wider(names_from = fraction, values_from = perc, values_fill = 0) |>
+  mutate(
+    total     = clay + silt + sand,
+    clay_norm = 100 * clay / total,
+    silt_norm = 100 * silt / total,
+    sand_norm = 100 * sand / total
+  ) |>
+  rename(SAND = sand_norm, CLAY = clay_norm, SILT = silt_norm) |> 
+  filter(total > 0) |>
+  mutate(dataset = factor(dataset, levels = map_chr(data_files, "label")))
+
+## Plot data on USDA soil textural triangle 
+
+### Using soiltexture package 
+
+# TT.plot expects a data frame with columns named CLAY, SILT, SAND in 0-100
+# tt_data <- replicate_texture |>
+#   transmute(
+#     CLAY  = clay_norm,
+#     SILT  = silt_norm,
+#     SAND  = sand_norm,
+#     dataset   = dataset,
+#     depth_val = depth_val
+#   ) |>
+#   as.data.frame()  # TT.plot doesn't like tibbles
+# 
+# # Draw the triangle with USDA classification
+# TT.plot(
+#   class.sys   = "USDA.TT",
+#   tri.data    = tt_data,
+#   col         = dataset_colours[tt_data$dataset],
+#   cex         = 1 + (tt_data$depth_val / max(tt_data$depth_val)) * 2,  # size by depth
+#   pch         = 16,
+#   main        = "USDA Soil Texture — All Datasets"
+# )
+# 
+# # Add a legend manually
+# legend("topleft", 
+#        legend = names(dataset_colours),
+#        col    = dataset_colours,
+#        pch    = 16,
+#        title  = "Dataset")
+
+### Using ggsoiltexture package 
+# p_texture <- ggsoiltexture(replicate_texture,
+#                             show_grid = FALSE,
+#                             class     = "USDA") +
+#   geom_point(aes(color = dataset,
+#                  alpha = depth_val),
+#              size = 3) +
+#   scale_colour_manual(values = dataset_colours) +
+#   scale_alpha_continuous(name = "Depth (m)", range = c(0.2, 1)) +
+#   labs(
+#     title  = "USDA Soil Texture — All Datasets",
+#     T      = "Clay (%)",
+#     L      = "Silt (%)",
+#     R      = "Sand (%)",
+#     colour = "Dataset"
+#   ) +
+#   theme_bw() +
+#   theme_showarrows() +
+#   theme(legend.position = "bottom")
+# 
+# print(p_texture)
+
+### Using ggtern package 
+
+# Build USDA class polygons from soiltexture vertex data
+vertices <- TT.vertices.tbl(class.sys = "USDA.TT")
+classes  <- TT.classes.tbl(class.sys  = "USDA.TT")
+
+# Convert point index strings to polygon data frames
+usda_polygons <- purrr::map_dfr(seq_len(nrow(classes)), function(i) {
+  pts <- as.integer(str_split(classes[i, "points"], ",\\s*")[[1]])
+  vertices[match(pts, vertices$points), ] |>
+    mutate(class = classes[i, "abbr"])
+})
+
+# Centroid of each class for labels
+usda_labels <- tribble(
+  ~class,    ~CLAY,  ~SILT,  ~SAND,
+  "Clay",    0.700,  0.150,  0.150,
+  "SiClay",  0.500,  0.450,  0.050,
+  "SaClay",  0.450,  0.050,  0.500,
+  "ClLoam",  0.320,  0.340,  0.340,
+  "SiClLo",  0.330,  0.570,  0.100,
+  "SaClLo",  0.260,  0.120,  0.620,
+  "Loam",    0.180,  0.410,  0.410,
+  "SiLoam",  0.120,  0.650,  0.230,
+  "SaLoam",  0.080,  0.250,  0.670,
+  "Silt",    0.060,  0.880,  0.060,
+  "Lo Sand", 0.060,  0.080,  0.860,
+  "Sand",    0.020,  0.050,  0.930
+)
+
+# Plot
+p_tern <- ggtern(data = replicate_texture,
+       aes(x = SAND, y = CLAY, z = SILT)) +
+  geom_polygon(data     = usda_polygons,
+               aes(x = SAND, y = CLAY, z = SILT, group = class),
+               fill     = NA,
+               colour   = "grey60",
+               linewidth = 0.3) +
+  annotate("text",
+         x      = usda_labels$SAND,
+         y      = usda_labels$CLAY,
+         z      = usda_labels$SILT,
+         label  = usda_labels$class,
+         size   = 5,
+         colour = "grey40")+
+  geom_point(aes(colour = dataset, alpha = depth_val),
+             size = 3) +
+  scale_colour_manual(values = dataset_colours) +
+  scale_alpha_continuous(name  = "Depth (m)", range = c(0.2, 1), guide = "none") +
+  labs(
+    title  = "USDA Soil Texture — All Datasets",
+    subtitle = "Point transparency dencreases with depth (shallow = faint, deep = solid)",
+    T      = "Clay (%)",
+    R      = "Silt (%)",
+    L      = "Sand (%)",
+    colour = "Dataset"
+  ) +
+  theme_bw() +
+  theme_clockwise() +
+  theme_showarrows() +
+  theme(legend.position = "bottom")
+
+print(p_tern)
+```
+---
+
+# Depth Comparisons
+
+*Each section shows the grain size distributions at one sample depth,
+with each dataset plotted as a separate line and showing all replicates.*
+
+```{r depth-comparison, results='asis', echo=FALSE, fig.height=5, fig.width=9}
+
+depths_present <- replicate_groups |>
+  distinct(sample_id, depth_val) |>
+  arrange(depth_val)
+
+for (i in seq_len(nrow(depths_present))) {
+
+  sid   <- depths_present$sample_id[i]
+  depth <- depths_present$depth_val[i]
+
+  cat(sprintf("\n\n## %s\n\n", sid))
+
+  depth_psd <- psd_long |>
+    filter(sample_id == sid) |>
+    group_by(dataset, sample_name, grain_um) |>
+    summarise(mean_vol = mean(perc_vol_in, na.rm = TRUE), .groups = "drop") |>
+    mutate(dataset = factor(dataset, levels = map_chr(data_files, "label")))
+
+  p <- depth_psd |>
+    ggplot(aes(x = grain_um, y = mean_vol,
+               colour = dataset, group = sample_name)) +
+    geom_line(linewidth = 1, alpha = 0.8) +
+    scale_x_log10(labels = label_number()) +
+    scale_y_continuous(limits = c(0, NA)) +
+    scale_colour_manual(values = dataset_colours) +
+    labs(
+      title    = paste("Grain size distributions —", sid),
+      subtitle = "Mean of replicates per dataset",
+      x        = "Grain size (µm)",
+      y        = "Volume %",
+      colour   = "Dataset"
+    ) +
+    theme_bw() +
+    theme(legend.position = "bottom")
+
+  print(p)
+  cat("\n\n---\n\n")
+}
+```
+
+---
+
+# Per-Sample Distributions
+
+*Each section shows the replicate curves for one sample plus a D10/D50/D90 coefficient of variation (CV%) table to assess sampling replicability*
+
+```{r per-sample, results='asis', echo=FALSE, fig.height=5, fig.width=9}
+
+for (i in seq_len(nrow(replicate_groups))) {
+
+  row    <- replicate_groups[i, ]
+  snames <- row$sample_names[[1]]
+  sid    <- row$sample_id
+  ds     <- row$dataset
+  meta   <- row$meta_code
+  notes  <- unlist(row$notes)
+
+  meta_str <- if (!is.na(meta)) paste0(" [", meta, "]") else ""
+  note_str <- if (length(notes) > 0) paste0(" {", paste(notes, collapse = ", "), "}") else ""
+  lbl      <- paste0(sid, meta_str, note_str)
+
+  # Use pre-split data
+  key <- paste(ds, sid, meta, sep = "||")
+  group_psd <- psd_split[[key]]
+
+  # Section heading
+  cat(sprintf("\n\n## %s  <small>(%s)</small>\n\n", lbl, ds))
+
+  if (length(notes) > 0) {
+    cat(sprintf("> **Notes:** %s\n\n", paste(notes, collapse = ", ")))
+  }
+
+  # Grain size distribution plots
+  p <- group_psd |>
+    ggplot(aes(x = grain_um, y = perc_vol_in, color = sample_name)) +
+    geom_line(linewidth = 1, alpha = 0.7) +
+    scale_x_log10(labels = label_number()) +
+    scale_y_continuous(limits = c(0, NA)) +
+    labs(
+      title    = lbl,
+      subtitle = paste0(ds,
+                        if (length(notes) > 0) paste0("  |  ", paste(notes, collapse = ", ")) else ""),
+      x        = "Grain size (µm)",
+      y        = "Volume %",
+      colour   = "Replicate"
+    ) +
+    theme_bw() +
+    theme(legend.position = "bottom")
+
+  print(p)
+  cat("\n\n")
+
+  # CV% table — pulled from pre-computed cv_all_raw
+  cv_tbl <- cv_all_raw |>
+    filter(dataset == ds, sample_id == sid,
+           if (!is.na(meta)) meta_code == meta else is.na(meta_code))
+
+  cat("**D10 / D50 / D90 replicate CV%**\n\n")
+
+  cv_tbl |>
+    select(
+      Percentile  = metric_label,
+      `Mean (µm)` = mean_val,
+      `SD (µm)`   = sd_val,
+      `CV%`       = cv_pct,
+      Status      = status
+    ) |>
+    mutate(across(where(is.numeric), ~ round(.x, 2))) |>
+    kable() |>
+    print()
+
+  cat("\n\n---\n\n")
+}
+```
+
+
+---
+
+**Report generated:** `r Sys.time()`
