@@ -1,0 +1,29 @@
+Package: grainSizeTools
+Title: Grain Size Analysis Tools for Laser Particle Size Analyser Data
+Version: 0.1.0
+Authors@R:
+    person("Andrew", "Oordt", email = "andrewoordt@gmail.com", role = c("aut", "cre"))
+Description: Tools for analysing and visualising grain size data from laser
+    particle size analysers (LPSA). Generates HTML reports comparing soil
+    profiles, plotting USDA textural triangles, and assessing replicate
+    consistency via coefficient of variation.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.2
+Imports:
+    dplyr,
+    forcats,
+    ggplot2,
+    ggtern,
+    janitor,
+    knitr,
+    purrr,
+    readr,
+    rmarkdown,
+    scales,
+    soiltexture,
+    stringr,
+    tidyr
+Suggests:
+    ggsoiltexture
