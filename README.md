@@ -27,9 +27,9 @@ generate_grain_size_report(
   sample_location = "My Site",
   author          = "Your Name",
   data_files      = list(
-    create_dataset("data/file1.txt", "Pre-treatment A", "#4E79A7"),
-    create_dataset("data/file2.txt", "Pre-treatment B", "#F28E2B"),
-    create_dataset("data/file3.txt", "Pre-treatment C", "#59A14F")
+    create_dataset("data/file1.txt", "Label 1", "#4E79A7"),
+    create_dataset("data/file2.txt", "Label 2", "#F28E2B"),
+    create_dataset("data/file3.txt", "Label 3", "#59A14F")
   ),
   min_replicates = 2
 )
