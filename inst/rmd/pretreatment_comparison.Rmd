@@ -137,23 +137,38 @@ summ_long <- summ_long |>
     by = "sample_name"
   )
 
+# ── Pretreatment code descriptions ───────────────────────────────────────────
+pretreatment_descriptions <- c(
+  "A" = "No Pretreatment",
+  "B" = "H2O2",
+  "C" = "H2O2 then Acetic",
+  "D" = "H2O2 then HCl",
+  "E" = "Acetic",
+  "F" = "Acetic then H2O2",
+  "G" = "HCl",
+  "I" = "Acetic then Furnace then CBD",
+  "J" = "HCl then Furnace then CBD"
+)
+
 # ── Assign consistent base colours to each meta_code ─────────────────────────
 meta_codes <- sort(unique(replicate_groups$meta_code))
 palette    <- c("#4E79A7", "#F28E2B", "#59A14F", "#E15759",
                 "#76B7B2", "#EDC948", "#B07AA1", "#FF9DA7")
-pretreatment_colours <- setNames(palette[seq_along(meta_codes)], meta_codes)
+pretreatment_colours <- setNames(palette[seq_along(meta_codes)],
+                                 pretreatment_descriptions[meta_codes])
 
 # ── Build comparison plot colour map (meta_code × note combinations) ──────────
 comparison_colour_map <- psd_long |>
   filter(sample_id %in% replicate_groups$sample_id, meta_code %in% meta_codes) |>
   distinct(meta_code, note) |>
   mutate(
+    display      = pretreatment_descriptions[meta_code],
     legend_label = if_else(!is.na(note),
-                           paste0(meta_code, " (", note, ")"),
-                           meta_code),
+                           paste0(display, " (", note, ")"),
+                           display),
     line_colour  = if_else(!is.na(note),
-                           map_chr(pretreatment_colours[meta_code], lighten_hex),
-                           pretreatment_colours[meta_code])
+                           map_chr(pretreatment_colours[display], lighten_hex),
+                           pretreatment_colours[display])
   )
 
 comparison_colour_values <- setNames(
@@ -204,10 +219,11 @@ replicate_groups |>
     Notes      = map_chr(notes, ~ if (length(.x) == 0) "—" else paste(.x, collapse = ", ")),
     Replicates = map_chr(sample_names, ~ paste(.x, collapse = ", "))
   ) |>
+  mutate(Pretreatment = pretreatment_descriptions[meta_code]) |>
   select(
     `Sample ID`  = sample_id,
     Depth        = depth_val,
-    Pretreatment = meta_code,
+    Pretreatment,
     Notes,
     N            = n_replicates,
     Replicates
@@ -242,7 +258,8 @@ replicate_texture <- psd_long |>
   ) |>
   rename(SAND = sand_norm, CLAY = clay_norm, SILT = silt_norm) |>
   filter(total > 0) |>
-  mutate(meta_code = factor(meta_code, levels = meta_codes))
+  mutate(pretreatment = factor(pretreatment_descriptions[meta_code],
+                               levels = pretreatment_descriptions[meta_codes]))
 
 vertices      <- TT.vertices.tbl(class.sys = "USDA.TT")
 classes       <- TT.classes.tbl(class.sys  = "USDA.TT")
@@ -282,7 +299,7 @@ p_tern <- ggtern(data = replicate_texture,
            label  = usda_labels$class,
            size   = 5,
            colour = "grey40") +
-  geom_point(aes(colour = meta_code), size = 3, alpha = 0.8) +
+  geom_point(aes(colour = pretreatment), size = 3, alpha = 0.8) +
   scale_colour_manual(values = pretreatment_colours) +
   labs(
     title  = "USDA Soil Texture — By Pretreatment",
@@ -311,8 +328,8 @@ comparison_data <- psd_long |>
          meta_code %in% meta_codes) |>
   mutate(
     legend_label = if_else(!is.na(note),
-                           paste0(meta_code, " (", note, ")"),
-                           meta_code)
+                           paste0(pretreatment_descriptions[meta_code], " (", note, ")"),
+                           pretreatment_descriptions[meta_code])
   )
 
 ggplot(comparison_data,
@@ -343,9 +360,9 @@ ggplot(comparison_data,
 for (mc in meta_codes) {
 
   groups_for_mc <- replicate_groups |> filter(meta_code == mc)
-  base_colour   <- pretreatment_colours[[mc]]
+  base_colour   <- pretreatment_colours[[pretreatment_descriptions[[mc]]]]
 
-  cat(sprintf("\n\n## Pretreatment %s\n\n", mc))
+  cat(sprintf("\n\n## %s\n\n", pretreatment_descriptions[[mc]]))
 
   rep_data <- psd_long |>
     filter(meta_code == mc,
@@ -355,6 +372,8 @@ for (mc in meta_codes) {
                              paste0("Rep ", rep_num, " (", note, ")"),
                              paste0("Rep ", rep_num))
     )
+
+  display <- pretreatment_descriptions[[mc]]
 
   # Build colour mapping for this pretreatment's replicates
   rep_colour_map <- rep_data |>
@@ -372,7 +391,7 @@ for (mc in meta_codes) {
     scale_y_continuous(limits = c(0, NA)) +
     scale_colour_manual(values = rep_colour_values) +
     labs(
-      title    = paste("Pretreatment", mc),
+      title    = display,
       subtitle = paste0(n_reps, " replicates"),
       x        = "Grain size (µm)",
       y        = "Volume %",
