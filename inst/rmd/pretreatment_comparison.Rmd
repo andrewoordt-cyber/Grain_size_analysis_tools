@@ -1,0 +1,407 @@
+---
+title: "`r paste(params$sample_location, '- Pretreatment Comparison')`"
+author: "`r params$author`"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+params:
+  sample_location: "Site"
+  author: ""
+  data_file: NULL
+  min_replicates: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 10, fig.height = 6)
+
+library(tidyverse)
+library(scales)
+library(janitor)
+library(knitr)
+library(ggtern)
+library(soiltexture)
+
+if (is.null(params$data_file) || !nzchar(params$data_file)) {
+  stop("data_file parameter is required.")
+}
+if (!file.exists(params$data_file)) {
+  stop(paste("File not found:", params$data_file))
+}
+
+min_replicates <- params$min_replicates
+
+# Lightens a hex colour by blending toward white
+lighten_hex <- function(hex, amount = 0.45) {
+  v <- col2rgb(hex) / 255
+  v <- v + (1 - v) * amount
+  rgb(v[1], v[2], v[3])
+}
+
+# ── Read instrument file ──────────────────────────────────────────────────────
+dat <- readr::read_delim(
+  file           = params$data_file,
+  delim          = "\t",
+  locale         = readr::locale(encoding = "UTF-16LE"),
+  show_col_types = FALSE
+) |>
+  dplyr::mutate(dplyr::across(
+    dplyr::where(is.character),
+    ~ gsub("\\?m", "um", .x)
+  )) |>
+  janitor::clean_names(replace = c("µ" = "u", "μ" = "u")) |>
+  mutate(
+    sample_name = sample_name |>
+      str_remove("^Average of\\s*'") |>
+      str_remove("'\\s*$")
+  )
+
+# ── Split bin columns from summary stats ─────────────────────────────────────
+is_bin_col <- str_detect(names(dat), "^x\\d")
+
+psd_long <- dat[, c("sample_name", names(dat)[is_bin_col]), drop = FALSE] |>
+  pivot_longer(
+    cols      = matches("^x\\d"),
+    names_to  = "grain_um",
+    values_to = "perc_vol_in"
+  ) |>
+  mutate(
+    grain_um = as.numeric(
+      str_replace_all(str_remove(grain_um, "^x"), "_", "."))
+  )
+
+summ_long <- dat |>
+  select(-matches("^x\\d")) |>
+  pivot_longer(
+    cols      = where(is.numeric),
+    names_to  = "metric",
+    values_to = "value_raw"
+  )
+
+# ── Parse sample names ────────────────────────────────────────────────────────
+parse_sample_name <- function(nm) {
+  tibble(sample_name = nm) |>
+    mutate(
+      note      = str_extract(sample_name, "(?<=_\\d{1,3}_)[^_].+$"),
+      rep_num   = str_extract(sample_name, "\\d+(?=(_[^_]+)?$)"),
+      meta_code = str_extract(sample_name,
+                               paste0("(?<=_)[A-Z](?=_", rep_num, ")")),
+      sample_id = str_remove(
+        sample_name,
+        paste0("_", replace_na(meta_code, ""),
+               if_else(!is.na(meta_code), "_", ""),
+               rep_num,
+               if_else(!is.na(note), paste0("_", note), ""),
+               "$")
+      ),
+      depth_val = as.numeric(str_extract(sample_id, "[\\d.]+$"))
+    )
+}
+
+sample_info <- psd_long |>
+  distinct(sample_name) |>
+  bind_cols(
+    parse_sample_name(
+      psd_long |> distinct(sample_name) |> pull(sample_name)
+    ) |> select(-sample_name)
+  )
+
+# ── Replicate groups ──────────────────────────────────────────────────────────
+replicate_groups <- sample_info |>
+  group_by(sample_id, depth_val, meta_code) |>
+  summarise(
+    n_replicates = n(),
+    sample_names = list(sample_name),
+    notes        = list(unique(na.omit(note))),
+    .groups      = "drop"
+  ) |>
+  filter(n_replicates >= min_replicates) |>
+  arrange(meta_code, depth_val)
+
+# ── Attach parsed fields to psd_long and summ_long ───────────────────────────
+psd_long <- psd_long |>
+  left_join(
+    sample_info |> select(sample_name, sample_id, depth_val, meta_code, rep_num, note),
+    by = "sample_name"
+  )
+
+summ_long <- summ_long |>
+  left_join(
+    sample_info |> select(sample_name, sample_id, depth_val, meta_code, note),
+    by = "sample_name"
+  )
+
+# ── Assign consistent base colours to each meta_code ─────────────────────────
+meta_codes <- sort(unique(replicate_groups$meta_code))
+palette    <- c("#4E79A7", "#F28E2B", "#59A14F", "#E15759",
+                "#76B7B2", "#EDC948", "#B07AA1", "#FF9DA7")
+pretreatment_colours <- setNames(palette[seq_along(meta_codes)], meta_codes)
+
+# ── Build comparison plot colour map (meta_code × note combinations) ──────────
+comparison_colour_map <- psd_long |>
+  filter(sample_id %in% replicate_groups$sample_id, meta_code %in% meta_codes) |>
+  distinct(meta_code, note) |>
+  mutate(
+    legend_label = if_else(!is.na(note),
+                           paste0(meta_code, " (", note, ")"),
+                           meta_code),
+    line_colour  = if_else(!is.na(note),
+                           map_chr(pretreatment_colours[meta_code], lighten_hex),
+                           pretreatment_colours[meta_code])
+  )
+
+comparison_colour_values <- setNames(
+  comparison_colour_map$line_colour,
+  comparison_colour_map$legend_label
+)
+
+# ── Pre-compute CV% ───────────────────────────────────────────────────────────
+cv_all_raw <- summ_long |>
+  filter(metric %in% c("dx_10", "dx_50", "dx_90")) |>
+  mutate(value = as.numeric(value_raw)) |>
+  inner_join(
+    replicate_groups |> select(sample_id, meta_code),
+    by = c("sample_id", "meta_code")
+  ) |>
+  group_by(sample_id, depth_val, meta_code, metric) |>
+  summarise(
+    mean_val = mean(value, na.rm = TRUE),
+    sd_val   = sd(value,   na.rm = TRUE),
+    cv_pct   = (sd_val / mean_val) * 100,
+    .groups  = "drop"
+  ) |>
+  mutate(
+    metric_label = recode(metric,
+      "dx_10" = "D10", "dx_50" = "D50", "dx_90" = "D90"),
+    status = case_when(
+      cv_pct < 3  ~ "Excellent",
+      cv_pct < 5  ~ "Good",
+      cv_pct < 10 ~ "Acceptable",
+      TRUE        ~ "Poor"
+    )
+  )
+```
+
+---
+
+# Overview
+
+```{r overview, echo=FALSE}
+cat(sprintf("File:                 %s\n", params$data_file))
+cat(sprintf("Pretreatments found:  %d  (%s)\n",
+            length(meta_codes), paste(meta_codes, collapse = ", ")))
+cat(sprintf("Sample groups:        %d  (minimum %d replicates each)\n\n",
+            nrow(replicate_groups), min_replicates))
+
+replicate_groups |>
+  mutate(
+    Notes      = map_chr(notes, ~ if (length(.x) == 0) "—" else paste(.x, collapse = ", ")),
+    Replicates = map_chr(sample_names, ~ paste(.x, collapse = ", "))
+  ) |>
+  select(
+    `Sample ID`  = sample_id,
+    Depth        = depth_val,
+    Pretreatment = meta_code,
+    Notes,
+    N            = n_replicates,
+    Replicates
+  ) |>
+  kable()
+```
+
+---
+
+# USDA Soil Texture Triangle
+
+```{r texture-triangle, echo=FALSE, fig.height=9, fig.width=10, message=FALSE, warning=FALSE}
+replicate_texture <- psd_long |>
+  filter(sample_id %in% replicate_groups$sample_id,
+         meta_code %in% meta_codes) |>
+  mutate(
+    fraction = case_when(
+      grain_um < 2                     ~ "clay",
+      grain_um >= 2  & grain_um < 50   ~ "silt",
+      grain_um >= 50 & grain_um < 2000 ~ "sand",
+      TRUE                             ~ "gravel"
+    )
+  ) |>
+  group_by(sample_name, sample_id, depth_val, meta_code, fraction) |>
+  summarise(perc = sum(perc_vol_in, na.rm = TRUE), .groups = "drop") |>
+  pivot_wider(names_from = fraction, values_from = perc, values_fill = 0) |>
+  mutate(
+    total     = clay + silt + sand,
+    clay_norm = 100 * clay / total,
+    silt_norm = 100 * silt / total,
+    sand_norm = 100 * sand / total
+  ) |>
+  rename(SAND = sand_norm, CLAY = clay_norm, SILT = silt_norm) |>
+  filter(total > 0) |>
+  mutate(meta_code = factor(meta_code, levels = meta_codes))
+
+vertices      <- TT.vertices.tbl(class.sys = "USDA.TT")
+classes       <- TT.classes.tbl(class.sys  = "USDA.TT")
+usda_polygons <- purrr::map_dfr(seq_len(nrow(classes)), function(i) {
+  pts <- as.integer(str_split(classes[i, "points"], ",\\s*")[[1]])
+  vertices[match(pts, vertices$points), ] |>
+    mutate(class = classes[i, "abbr"])
+})
+
+usda_labels <- tribble(
+  ~class,    ~CLAY,  ~SILT,  ~SAND,
+  "Clay",    0.700,  0.150,  0.150,
+  "SiClay",  0.500,  0.450,  0.050,
+  "SaClay",  0.450,  0.050,  0.500,
+  "ClLoam",  0.320,  0.340,  0.340,
+  "SiClLo",  0.330,  0.570,  0.100,
+  "SaClLo",  0.260,  0.120,  0.620,
+  "Loam",    0.180,  0.410,  0.410,
+  "SiLoam",  0.120,  0.650,  0.230,
+  "SaLoam",  0.080,  0.250,  0.670,
+  "Silt",    0.060,  0.880,  0.060,
+  "Lo Sand", 0.060,  0.080,  0.860,
+  "Sand",    0.020,  0.050,  0.930
+)
+
+p_tern <- ggtern(data = replicate_texture,
+                 aes(x = SAND, y = CLAY, z = SILT)) +
+  geom_polygon(data      = usda_polygons,
+               aes(x = SAND, y = CLAY, z = SILT, group = class),
+               fill      = NA,
+               colour    = "grey60",
+               linewidth = 0.3) +
+  annotate("text",
+           x      = usda_labels$SAND,
+           y      = usda_labels$CLAY,
+           z      = usda_labels$SILT,
+           label  = usda_labels$class,
+           size   = 5,
+           colour = "grey40") +
+  geom_point(aes(colour = meta_code), size = 3, alpha = 0.8) +
+  scale_colour_manual(values = pretreatment_colours) +
+  labs(
+    title  = "USDA Soil Texture — By Pretreatment",
+    T      = "Clay (%)",
+    R      = "Silt (%)",
+    L      = "Sand (%)",
+    colour = "Pretreatment"
+  ) +
+  theme_bw() +
+  theme_clockwise() +
+  theme_showarrows() +
+  theme(legend.position = "bottom")
+
+print(p_tern)
+```
+
+---
+
+# Pretreatment Comparison
+
+*All replicates shown. Noted replicates appear as a lighter shade of their pretreatment colour.*
+
+```{r comparison-plot, echo=FALSE}
+comparison_data <- psd_long |>
+  filter(sample_id %in% replicate_groups$sample_id,
+         meta_code %in% meta_codes) |>
+  mutate(
+    legend_label = if_else(!is.na(note),
+                           paste0(meta_code, " (", note, ")"),
+                           meta_code)
+  )
+
+ggplot(comparison_data,
+       aes(x = grain_um, y = perc_vol_in,
+           group = sample_name, colour = legend_label)) +
+  geom_line(linewidth = 0.9, alpha = 0.85) +
+  scale_x_log10(labels = label_number()) +
+  scale_y_continuous(limits = c(0, NA)) +
+  scale_colour_manual(values = comparison_colour_values) +
+  labs(
+    title    = paste("Grain Size Distributions —", params$sample_location),
+    subtitle = "All replicates; lighter shade = noted variant",
+    x        = "Grain size (µm)",
+    y        = "Volume %",
+    colour   = "Pretreatment"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+---
+
+# Per-Pretreatment
+
+*Each replicate shown individually. Noted replicates appear as a lighter shade.*
+
+```{r per-pretreatment, results='asis', echo=FALSE}
+for (mc in meta_codes) {
+
+  groups_for_mc <- replicate_groups |> filter(meta_code == mc)
+  base_colour   <- pretreatment_colours[[mc]]
+
+  cat(sprintf("\n\n## Pretreatment %s\n\n", mc))
+
+  rep_data <- psd_long |>
+    filter(meta_code == mc,
+           sample_id %in% groups_for_mc$sample_id) |>
+    mutate(
+      legend_label = if_else(!is.na(note),
+                             paste0("Rep ", rep_num, " (", note, ")"),
+                             paste0("Rep ", rep_num))
+    )
+
+  # Build colour mapping for this pretreatment's replicates
+  rep_colour_map <- rep_data |>
+    distinct(legend_label, note) |>
+    mutate(line_colour = if_else(!is.na(note), lighten_hex(base_colour), base_colour))
+  rep_colour_values <- setNames(rep_colour_map$line_colour, rep_colour_map$legend_label)
+
+  n_reps <- n_distinct(rep_data$sample_name)
+
+  p <- ggplot(rep_data,
+              aes(x = grain_um, y = perc_vol_in,
+                  group = sample_name, colour = legend_label)) +
+    geom_line(linewidth = 0.9, alpha = 0.85) +
+    scale_x_log10(labels = label_number()) +
+    scale_y_continuous(limits = c(0, NA)) +
+    scale_colour_manual(values = rep_colour_values) +
+    labs(
+      title    = paste("Pretreatment", mc),
+      subtitle = paste0(n_reps, " replicates"),
+      x        = "Grain size (µm)",
+      y        = "Volume %",
+      colour   = "Replicate"
+    ) +
+    theme_bw() +
+    theme(legend.position = "bottom")
+
+  print(p)
+  cat("\n\n")
+
+  cv_tbl <- cv_all_raw |> filter(meta_code == mc)
+
+  cat("**D10 / D50 / D90 replicate CV%**\n\n")
+
+  cv_tbl |>
+    select(
+      Percentile  = metric_label,
+      `Mean (µm)` = mean_val,
+      `SD (µm)`   = sd_val,
+      `CV%`       = cv_pct,
+      Status      = status
+    ) |>
+    mutate(across(where(is.numeric), ~ round(.x, 2))) |>
+    kable() |>
+    print()
+
+  cat("\n\n---\n\n")
+}
+```
+
+---
+
+**Report generated:** `r Sys.time()`

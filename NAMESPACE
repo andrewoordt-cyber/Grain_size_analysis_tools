@@ -2,3 +2,4 @@
 
 export(create_dataset)
 export(generate_grain_size_report)
+export(generate_pretreatment_report)
