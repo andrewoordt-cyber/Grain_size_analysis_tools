@@ -105,6 +105,7 @@ read_instrument_file <- function(path, dataset_label, ref_bin_names = NULL) {
       ~ gsub("\\?m", "um", .x)
     )) |>
     janitor::clean_names(replace = c("µ" = "u", "μ" = "u")) |>
+    filter(str_detect(sample_name, "^Average of\\s*'")) |>
     mutate(
       sample_name = sample_name |>
         str_remove("^Average of\\s*'") |>

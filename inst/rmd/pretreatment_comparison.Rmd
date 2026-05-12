@@ -42,6 +42,7 @@ lighten_hex <- function(hex, amount = 0.45) {
   rgb(v[1], v[2], v[3])
 }
 
+
 # ── Read instrument file ──────────────────────────────────────────────────────
 dat <- readr::read_delim(
   file           = params$data_file,
@@ -54,6 +55,7 @@ dat <- readr::read_delim(
     ~ gsub("\\?m", "um", .x)
   )) |>
   janitor::clean_names(replace = c("µ" = "u", "μ" = "u")) |>
+  filter(str_detect(sample_name, "^Average of\\s*'")) |>
   mutate(
     sample_name = sample_name |>
       str_remove("^Average of\\s*'") |>
