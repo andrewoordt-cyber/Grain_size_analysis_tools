@@ -431,7 +431,7 @@ for (i in seq_len(nrow(depths_present))) {
     ggplot(aes(x = grain_um, y = mean_vol,
                colour = dataset, group = sample_name)) +
     geom_line(linewidth = 1, alpha = 0.8) +
-    scale_x_log10(labels = label_number()) +
+    scale_x_log10(breaks = c(0.1, 1, 10, 100, 1000), labels = label_number()) +
     scale_y_continuous(limits = c(0, NA)) +
     scale_colour_manual(values = dataset_colours) +
     labs(
@@ -485,7 +485,7 @@ for (i in seq_len(nrow(replicate_groups))) {
   p <- group_psd |>
     ggplot(aes(x = grain_um, y = perc_vol_in, color = sample_name)) +
     geom_line(linewidth = 1, alpha = 0.7) +
-    scale_x_log10(labels = label_number()) +
+    scale_x_log10(breaks = c(0.1, 1, 10, 100, 1000), labels = label_number()) +
     scale_y_continuous(limits = c(0, NA)) +
     labs(
       title    = lbl,

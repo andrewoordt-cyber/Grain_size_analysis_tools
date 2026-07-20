@@ -23,6 +23,7 @@ library(tidyverse)
 library(scales)
 library(janitor)
 library(knitr)
+library(plotly)
 library(ggtern)
 library(soiltexture)
 
@@ -332,22 +333,24 @@ comparison_data <- psd_long |>
                            pretreatment_descriptions[meta_code])
   )
 
-ggplot(comparison_data,
+p_comparison <- ggplot(comparison_data,
        aes(x = grain_um, y = perc_vol_in,
            group = sample_name, colour = legend_label)) +
   geom_line(linewidth = 0.9, alpha = 0.85) +
-  scale_x_log10(labels = label_number()) +
+  scale_x_log10(breaks = c(0.1, 1, 10, 100, 1000), labels = label_number()) +
   scale_y_continuous(limits = c(0, NA)) +
   scale_colour_manual(values = comparison_colour_values) +
   labs(
     title    = paste("Grain Size Distributions —", params$sample_location),
-    subtitle = "All replicates; lighter shade = noted variant",
+    subtitle = "All replicates. Click legend to toggle pretreatments.",
     x        = "Grain size (µm)",
     y        = "Volume %",
     colour   = "Pretreatment"
   ) +
   theme_bw() +
   theme(legend.position = "bottom")
+
+ggplotly(p_comparison) |> layout(legend = list(orientation = "h", y = -0.2))
 ```
 
 ---
@@ -387,7 +390,7 @@ for (mc in meta_codes) {
               aes(x = grain_um, y = perc_vol_in,
                   group = sample_name, colour = legend_label)) +
     geom_line(linewidth = 0.9, alpha = 0.85) +
-    scale_x_log10(labels = label_number()) +
+    scale_x_log10(breaks = c(0.1, 1, 10, 100, 1000), labels = label_number()) +
     scale_y_continuous(limits = c(0, NA)) +
     scale_colour_manual(values = rep_colour_values) +
     labs(
